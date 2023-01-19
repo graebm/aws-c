@@ -21,3 +21,5 @@ add_subdirectory(aws-c-auth)
 add_subdirectory(aws-c-mqtt)
 add_subdirectory(aws-c-s3)
 add_subdirectory(aws-c-iot)
+
+add_subdirectory(s3perf)
