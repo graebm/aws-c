@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <list>
 #include <sstream>
 
 #include <aws/auth/credentials.h>
@@ -17,6 +18,7 @@
 #define BUCKET "s3perf-eu-west-1"
 #define KiB 1024
 #define MiB (1024 * 1024)
+#define GiB (1024LL * 1024 * 1024)
 #define THROUGHPUT_TARGET_Gbps 100.0
 
 using Clock = std::chrono::high_resolution_clock;
@@ -92,9 +94,22 @@ void AddHeader(aws_http_message *request, const std::string &name, const std::st
     aws_http_message_add_header(request, header);
 }
 
-struct Response
+class Upload
 {
+public:
+    std::string m_filepath;
+    int64_t m_fileSize;
+    aws_s3_meta_request *m_metaRequest;
     std::promise<void> m_donePromise;
+    std::future<void> m_doneFuture;
+
+    Upload(const std::string &filename);
+    Upload(const Upload &) = delete;
+
+    ~Upload()
+    {
+        aws_s3_meta_request_release(m_metaRequest);
+    }
 };
 
 void OnResponseComplete(struct aws_s3_meta_request *meta_request,
@@ -123,75 +138,88 @@ void OnResponseComplete(struct aws_s3_meta_request *meta_request,
         exit(1);
     }
 
-    Response *response = static_cast<Response *>(user_data);
-    response->m_donePromise.set_value();
+    Upload *upload = static_cast<Upload *>(user_data);
+    upload->m_donePromise.set_value();
 }
 
-void Upload(const std::string filename)
+Upload::Upload(const std::string &filepath)
+    : m_filepath(filepath), m_donePromise(), m_doneFuture(m_donePromise.get_future())
 {
-    auto fileStream = aws_input_stream_new_from_file(g_alloc, filename.c_str());
+    auto fileStream = aws_input_stream_new_from_file(g_alloc, filepath.c_str());
     AWS_FATAL_ASSERT(fileStream);
-    int64_t fileLength = 0;
-    AWS_FATAL_ASSERT(aws_input_stream_get_length(fileStream, &fileLength) == 0);
+    AWS_FATAL_ASSERT(aws_input_stream_get_length(fileStream, &m_fileSize) == 0);
 
-    auto requestPath = std::string("/") + std::filesystem::path(filename).filename().string();
+    auto requestPath = std::string("/") + std::filesystem::path(filepath).filename().string();
 
     struct aws_http_message *request = aws_http_message_new_request(g_alloc);
     aws_http_message_set_request_method(request, aws_byte_cursor_from_c_str("PUT"));
     aws_http_message_set_request_path(request, aws_byte_cursor_from_c_str(requestPath.c_str()));
     aws_http_message_set_body_stream(request, fileStream);
     AddHeader(request, "Host", std::string() + BUCKET ".s3." REGION ".amazonaws.com");
-    AddHeader(request, "Content-Length", std::to_string(fileLength));
+    AddHeader(request, "Content-Length", std::to_string(m_fileSize));
     AddHeader(request, "Content-Type", "application/octet-stream");
-
-    Response response;
-    auto doneFuture = response.m_donePromise.get_future();
 
     aws_s3_meta_request_options options;
     AWS_ZERO_STRUCT(options);
     options.type = AWS_S3_META_REQUEST_TYPE_PUT_OBJECT;
     options.message = request;
-    options.user_data = &response;
+    options.user_data = this;
     options.finish_callback = OnResponseComplete;
 
-    aws_s3_meta_request *metaRequest = aws_s3_client_make_meta_request(g_s3Client, &options);
-    AWS_FATAL_ASSERT(metaRequest);
+    m_metaRequest = aws_s3_client_make_meta_request(g_s3Client, &options);
+    AWS_FATAL_ASSERT(m_metaRequest);
 
-    doneFuture.wait();
-
-    aws_s3_meta_request_release(metaRequest);
     aws_http_message_release(request);
     aws_input_stream_release(fileStream);
 }
 
+double GetDuration(Clock::time_point startTime)
+{
+    return std::chrono::duration<double>(Clock::now() - startTime).count();
+}
+
 int main(int argc, char *argv[])
 {
-
     std::string filepath = argv[1];
-    int repeatCount = atoi(argv[2]);
-    std::cout << "--- uploading " << filepath << "01 -> " << std::setw(2) << std::setfill('0') << repeatCount << " ---\n";
+    int count = atoi(argv[2]);
+    std::cout << "--- uploading " << filepath << "01 -> " << std::setw(2) << std::setfill('0') << count << " ---\n";
 
     Init();
 
-    auto startTime = Clock::now();
-
-    for (int i = 0; i < repeatCount; ++i)
+    auto appStart = Clock::now();
+    int repeatI = 0;
+    while (GetDuration(appStart) < (3 * 60))
     {
-        std::ostringstream filepathI;
-        filepathI << filepath << std::setw(2) << std::setfill('0') << (i + 1);
-        std::cout << filepathI.str() << ": ...";
-        std::cout.flush();
+        std::cout << "- attempt #" << ++repeatI
+                  << " running for " << std::fixed << std::setprecision(3) << GetDuration(appStart) << "s -\n";
 
-        auto uploadStartTime = Clock::now();
+        std::list<Upload> uploads;
+        auto startTime = Clock::now();
+        for (int i = 0; i < count; ++i)
+        {
+            std::ostringstream filepathI;
+            filepathI << filepath << std::setw(2) << std::setfill('0') << (i + 1);
+            uploads.emplace_back(filepathI.str());
+        }
 
-        Upload(filepathI.str());
+        int64_t totalBytes = 0;
+        for (auto &upload : uploads)
+        {
+            totalBytes += upload.m_fileSize;
+            upload.m_doneFuture.wait();
 
-        auto durationI = std::chrono::duration<double>(Clock::now() - uploadStartTime).count();
-        std::cout << "\b\b\b" << std::fixed << std::setprecision(3) << durationI << "s\n";
+            if (upload.m_fileSize >= (10 * GiB))
+            {
+                std::cout << upload.m_filepath << ": " << std::fixed << std::setprecision(3) << GetDuration(startTime) << "s\n";
+            }
+        }
+
+        auto duration = GetDuration(startTime);
+        std::cout << "Total time: " << std::fixed << std::setprecision(3) << duration << "s\n";
+        std::cout << "Avg per file: " << std::fixed << std::setprecision(3) << (duration / count) << "s\n";
+
+        double gibibytes = (double)totalBytes / (double)GiB;
+        std::cout << "GiB/s: " << std::fixed << std::setprecision(3) << (gibibytes / duration) << std::endl;
     }
-
-    auto endTime = Clock::now();
-    auto totalDuration = std::chrono::duration<double>(endTime - startTime).count();
-    std::cout << "Total time: " << std::fixed << std::setprecision(3) << totalDuration << "s\n";
     return 0;
 }
