@@ -7,7 +7,12 @@ set(IN_SOURCE_BUILD ON)
 
 add_subdirectory(aws-c-common)
 if(UNIX AND NOT APPLE)
-    add_subdirectory(aws-lc)
+    # set(DISABLE_GO ON) # Build without using Go, we don't want the extra dependency
+    # set(DISABLE_PERL ON) # Build without using Perl, we don't want the extra dependency
+    # set(BUILD_LIBSSL OFF) # Don't need libssl, only need libcrypto
+    # add_subdirectory(aws-lc)
+
+    set(UNSAFE_TREAT_WARNINGS_AS_ERRORS OFF)
     add_subdirectory(s2n)
 endif()
 add_subdirectory(aws-c-cal)

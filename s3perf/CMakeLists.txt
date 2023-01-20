@@ -9,9 +9,10 @@ file(GLOB SRC_FILES
 add_executable(${PROJECT_NAME} ${SRC_FILES})
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
-    CXX_STANDARD 20)
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON)
 
-target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Werror)
+target_compile_options(${PROJECT_NAME} PRIVATE -Wall)
 
 include(AwsFindPackage)
 aws_use_package(aws-c-s3)
