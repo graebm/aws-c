@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include <aws/auth/credentials.h>
+#include <aws/common/trace_event.h>
 #include <aws/http/request_response.h>
 #include <aws/io/channel_bootstrap.h>
 #include <aws/io/event_loop.h>
@@ -25,27 +26,30 @@ using Clock = std::chrono::high_resolution_clock;
 
 aws_allocator *g_alloc;
 aws_event_loop_group *g_eventLoopGroup;
+std::promise<void> g_eventLoopGroupDone;
 aws_host_resolver *g_hostResolver;
 aws_client_bootstrap *g_bootstrap;
 aws_tls_ctx *g_tlsCtx;
 aws_credentials_provider *g_credentialsProvider;
 aws_s3_client *g_s3Client;
 
-Clock::duration doSync(std::string filename)
-{
-    auto startTime = Clock::now();
-    auto endTime = Clock::now();
-
-    return endTime - startTime;
+void OnEventLoopGroupDestroyed(void *userData) {
+    g_eventLoopGroupDone.set_value();
 }
 
 void Init()
 {
     g_alloc = aws_default_allocator();
     aws_s3_library_init(g_alloc);
+    aws_trace_system_init(g_alloc, "trace.json");
 
+    AWS_TRACE_EVENT_NAME_THREAD("MainThread");
+
+    struct aws_shutdown_callback_options elgShutdownOpts = {
+        .shutdown_callback_fn = OnEventLoopGroupDestroyed,
+    };
     g_eventLoopGroup = aws_event_loop_group_new_default_pinned_to_cpu_group(
-        g_alloc, 0 /*max-threads*/, 0 /*cpu-group*/, NULL);
+        g_alloc, 0 /*max-threads*/, 0 /*cpu-group*/, &elgShutdownOpts);
     AWS_FATAL_ASSERT(g_eventLoopGroup);
 
     aws_host_resolver_default_options resolverOpts = {
@@ -69,7 +73,8 @@ void Init()
     aws_tls_connection_options tlsConnOpts;
     aws_tls_connection_options_init_from_ctx(&tlsConnOpts, g_tlsCtx);
 
-    aws_credentials_provider_chain_default_options providerOpts = {0};
+    aws_credentials_provider_chain_default_options providerOpts;
+    AWS_ZERO_STRUCT(providerOpts);
     providerOpts.bootstrap = g_bootstrap;
     providerOpts.tls_ctx = g_tlsCtx;
     g_credentialsProvider = aws_credentials_provider_new_chain_default(g_alloc, &providerOpts);
@@ -86,6 +91,26 @@ void Init()
     s3ClientConfig.throughput_target_gbps = THROUGHPUT_TARGET_Gbps;
     g_s3Client = aws_s3_client_new(g_alloc, &s3ClientConfig);
     AWS_FATAL_ASSERT(g_s3Client);
+}
+
+void CleanUp() {
+    g_s3Client = aws_s3_client_release(g_s3Client);
+    g_credentialsProvider = aws_credentials_provider_release(g_credentialsProvider);
+    aws_tls_ctx_release(g_tlsCtx);
+    g_tlsCtx = NULL;
+    aws_client_bootstrap_release(g_bootstrap);
+    g_bootstrap = NULL;
+    aws_host_resolver_release(g_hostResolver);
+    g_hostResolver = NULL;
+    aws_event_loop_group_release(g_eventLoopGroup);
+    g_eventLoopGroup = NULL;
+
+    g_eventLoopGroupDone.get_future().wait();
+
+    aws_trace_system_clean_up();
+    aws_thread_set_managed_join_timeout_ns(UINT64_MAX);
+    aws_thread_join_all_managed();
+    aws_s3_library_clean_up();
 }
 
 void AddHeader(aws_http_message *request, const std::string &name, const std::string &value)
@@ -188,10 +213,13 @@ int main(int argc, char *argv[])
 
     auto appStart = Clock::now();
     int repeatI = 0;
-    while (GetDuration(appStart) < (3 * 60))
+    double runForSec = 0.0;
+    do
     {
         std::cout << "- attempt #" << ++repeatI
                   << " running for " << std::fixed << std::setprecision(3) << GetDuration(appStart) << "s -\n";
+
+        AWS_TRACE_EVENT_BEGIN_SCOPED("s3perf", "Run");
 
         std::list<Upload> uploads;
         auto startTime = Clock::now();
@@ -214,12 +242,16 @@ int main(int argc, char *argv[])
             }
         }
 
+        AWS_TRACE_EVENT_END_SCOPED();
+
         auto duration = GetDuration(startTime);
         std::cout << "Total time: " << std::fixed << std::setprecision(3) << duration << "s\n";
         std::cout << "Avg per file: " << std::fixed << std::setprecision(3) << (duration / count) << "s\n";
 
         double gibibytes = (double)totalBytes / (double)GiB;
         std::cout << "GiB/s: " << std::fixed << std::setprecision(3) << (gibibytes / duration) << std::endl;
-    }
+    } while (GetDuration(appStart) < runForSec);
+
+    CleanUp();
     return 0;
 }
