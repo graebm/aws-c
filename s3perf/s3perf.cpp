@@ -20,6 +20,7 @@
 #define KiB 1024
 #define MiB (1024 * 1024)
 #define GiB (1024LL * 1024 * 1024)
+#define BytesToGigabits (8e-9)
 #define THROUGHPUT_TARGET_Gbps 100.0
 
 using Clock = std::chrono::high_resolution_clock;
@@ -217,7 +218,7 @@ int main(int argc, char *argv[])
     do
     {
         std::cout << "- attempt #" << ++repeatI
-                  << " running for " << std::fixed << std::setprecision(3) << GetDuration(appStart) << "s -\n";
+                  << " (warmed up " << std::fixed << std::setprecision(3) << GetDuration(appStart) << "s) -\n";
 
         AWS_TRACE_EVENT_BEGIN_SCOPED("s3perf", "Run");
 
@@ -250,6 +251,10 @@ int main(int argc, char *argv[])
 
         double gibibytes = (double)totalBytes / (double)GiB;
         std::cout << "GiB/s: " << std::fixed << std::setprecision(3) << (gibibytes / duration) << std::endl;
+
+        double gigibits = (double)totalBytes * BytesToGigabits;
+        std::cout << "Gbps: " << std::fixed << std::setprecision(3) << (gigibits / duration) << std::endl;
+
     } while (GetDuration(appStart) < runForSec);
 
     CleanUp();
