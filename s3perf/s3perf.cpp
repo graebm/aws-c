@@ -6,7 +6,9 @@
 #include <sstream>
 
 #include <aws/auth/credentials.h>
+#include <aws/common/clock.h>
 #include <aws/common/trace_event.h>
+#include <aws/http/connection.h>
 #include <aws/http/request_response.h>
 #include <aws/io/channel_bootstrap.h>
 #include <aws/io/event_loop.h>
@@ -26,6 +28,7 @@
 using Clock = std::chrono::high_resolution_clock;
 
 aws_allocator *g_alloc;
+struct aws_logger g_logger;
 aws_event_loop_group *g_eventLoopGroup;
 std::promise<void> g_eventLoopGroupDone;
 aws_host_resolver *g_hostResolver;
@@ -34,7 +37,8 @@ aws_tls_ctx *g_tlsCtx;
 aws_credentials_provider *g_credentialsProvider;
 aws_s3_client *g_s3Client;
 
-void OnEventLoopGroupDestroyed(void *userData) {
+void OnEventLoopGroupDestroyed(void *userData)
+{
     g_eventLoopGroupDone.set_value();
 }
 
@@ -42,7 +46,14 @@ void Init()
 {
     g_alloc = aws_default_allocator();
     aws_s3_library_init(g_alloc);
-    aws_trace_system_init(g_alloc, "trace.json");
+    // aws_trace_system_init(g_alloc, "trace.json");
+
+    // struct aws_logger_standard_options logOpts = {
+    //     .level = AWS_LL_TRACE,
+    //     .file = stderr,
+    // };
+    // AWS_FATAL_ASSERT(aws_logger_init_noalloc(&g_logger, g_alloc, &logOpts) == 0);
+    // aws_logger_set(&g_logger);
 
     AWS_TRACE_EVENT_NAME_THREAD("MainThread");
 
@@ -84,17 +95,25 @@ void Init()
     aws_signing_config_aws signingConfig;
     aws_s3_init_default_signing_config(&signingConfig, aws_byte_cursor_from_c_str(REGION), g_credentialsProvider);
 
+    struct aws_http_connection_monitoring_options httpMonitoringOpts;
+    AWS_ZERO_STRUCT(httpMonitoringOpts);
+    httpMonitoringOpts.minimum_throughput_bytes_per_second = 1;
+    httpMonitoringOpts.allowable_throughput_failure_interval_milliseconds = 750;
+
     aws_s3_client_config s3ClientConfig = {0};
     s3ClientConfig.region = aws_byte_cursor_from_c_str(REGION);
     s3ClientConfig.client_bootstrap = g_bootstrap;
     s3ClientConfig.tls_connection_options = &tlsConnOpts;
     s3ClientConfig.signing_config = &signingConfig;
+    s3ClientConfig.part_size = 8 * MiB;
     s3ClientConfig.throughput_target_gbps = THROUGHPUT_TARGET_Gbps;
+    // s3ClientConfig.monitoring_options = &httpMonitoringOpts;
     g_s3Client = aws_s3_client_new(g_alloc, &s3ClientConfig);
     AWS_FATAL_ASSERT(g_s3Client);
 }
 
-void CleanUp() {
+void CleanUp()
+{
     g_s3Client = aws_s3_client_release(g_s3Client);
     g_credentialsProvider = aws_credentials_provider_release(g_credentialsProvider);
     aws_tls_ctx_release(g_tlsCtx);
@@ -212,9 +231,10 @@ int main(int argc, char *argv[])
 
     Init();
 
+    fprintf(stderr, "DURATION,START,END,SENDING,WAITING,RECEIVING,CONN REQ#,ERROR,STATUS CODE,IP,CONN ID,THREAD ID,REQUEST,X-AMZ-REQUEST-ID,X-AMZ-ID-2\n");
+
     auto appStart = Clock::now();
     int repeatI = 0;
-    double runForSec = 0.0;
     do
     {
         std::cout << "- attempt #" << ++repeatI
@@ -224,6 +244,7 @@ int main(int argc, char *argv[])
 
         std::list<Upload> uploads;
         auto startTime = Clock::now();
+        aws_high_res_clock_get_ticks(&g_app_start_time);
         for (int i = 0; i < count; ++i)
         {
             std::ostringstream filepathI;
@@ -239,7 +260,10 @@ int main(int argc, char *argv[])
 
             if (upload.m_fileSize >= (10 * GiB))
             {
-                std::cout << upload.m_filepath << ": " << std::fixed << std::setprecision(3) << GetDuration(startTime) << "s\n";
+                if (count > 1)
+                {
+                    std::cout << upload.m_filepath << ": " << std::fixed << std::setprecision(3) << GetDuration(startTime) << "s\n";
+                }
             }
         }
 
@@ -247,15 +271,20 @@ int main(int argc, char *argv[])
 
         auto duration = GetDuration(startTime);
         std::cout << "Total time: " << std::fixed << std::setprecision(3) << duration << "s\n";
-        std::cout << "Avg per file: " << std::fixed << std::setprecision(3) << (duration / count) << "s\n";
+        if (count > 1)
+        {
+            std::cout << "Avg per file: " << std::fixed << std::setprecision(3) << (duration / count) << "s\n";
+        }
 
-        double gibibytes = (double)totalBytes / (double)GiB;
-        std::cout << "GiB/s: " << std::fixed << std::setprecision(3) << (gibibytes / duration) << std::endl;
+        // double gibibytes = (double)totalBytes / (double)GiB;
+        // std::cout << "GiB/s: " << std::fixed << std::setprecision(3) << (gibibytes / duration) << std::endl;
 
         double gigibits = (double)totalBytes * BytesToGigabits;
-        std::cout << "Gbps: " << std::fixed << std::setprecision(3) << (gigibits / duration) << std::endl;
+        double gbps = gigibits / duration;
+        std::cout << "Gbps: " << std::fixed << std::setprecision(3) << gbps << std::endl;
 
-    } while (GetDuration(appStart) < runForSec);
+    } while (repeatI < 0);
+    // } while (GetDuration(appStart) < 60.0);
 
     CleanUp();
     return 0;
