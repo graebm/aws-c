@@ -7,8 +7,21 @@ set(IN_SOURCE_BUILD ON)
 
 add_subdirectory(aws-c-common)
 if(UNIX AND NOT APPLE)
-    add_subdirectory(aws-lc)
+    # don't build tests for s2n or aws-lc
+    set(BUILD_TESTING_PREV ${BUILD_TESTING})
+    set(BUILD_TESTING OFF)
+
+    if(NOT USE_OPENSSL)
+        set(BUILD_LIBSSL OFF) # only build libcrypto, don't build libssl
+        set(DISABLE_GO ON) # don't run codegen
+        set(DISABLE_PERL ON) # don't run codegen
+        add_subdirectory(aws-lc)
+    endif()
+
+    set(UNSAFE_TREAT_WARNINGS_AS_ERRORS OFF) # disable warnings-as-errors when building s2n
     add_subdirectory(s2n)
+
+    set(BUILD_TESTING ${BUILD_TESTING_PREV})
 endif()
 add_subdirectory(aws-c-cal)
 add_subdirectory(aws-c-io)
