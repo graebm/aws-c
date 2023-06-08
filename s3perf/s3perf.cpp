@@ -17,6 +17,9 @@
 #include <aws/io/stream.h>
 #include <aws/io/tls_channel_handler.h>
 
+#define AWS_UNSTABLE_TESTING_API 1
+#include <aws/testing/async_stream_tester.h>
+
 #define REGION "eu-west-1"
 #define BUCKET "s3perf-eu-west-1"
 #define KiB 1024
@@ -95,10 +98,10 @@ void Init()
     aws_signing_config_aws signingConfig;
     aws_s3_init_default_signing_config(&signingConfig, aws_byte_cursor_from_c_str(REGION), g_credentialsProvider);
 
-    struct aws_http_connection_monitoring_options httpMonitoringOpts;
-    AWS_ZERO_STRUCT(httpMonitoringOpts);
-    httpMonitoringOpts.minimum_throughput_bytes_per_second = 1;
-    httpMonitoringOpts.allowable_throughput_failure_interval_milliseconds = 750;
+    // struct aws_http_connection_monitoring_options httpMonitoringOpts;
+    // AWS_ZERO_STRUCT(httpMonitoringOpts);
+    // httpMonitoringOpts.minimum_throughput_bytes_per_second = 1;
+    // httpMonitoringOpts.allowable_throughput_failure_interval_milliseconds = 750;
 
     aws_s3_client_config s3ClientConfig = {0};
     s3ClientConfig.region = aws_byte_cursor_from_c_str(REGION);
@@ -199,7 +202,6 @@ Upload::Upload(const std::string &filepath)
     struct aws_http_message *request = aws_http_message_new_request(g_alloc);
     aws_http_message_set_request_method(request, aws_byte_cursor_from_c_str("PUT"));
     aws_http_message_set_request_path(request, aws_byte_cursor_from_c_str(requestPath.c_str()));
-    aws_http_message_set_body_stream(request, fileStream);
     AddHeader(request, "Host", std::string() + BUCKET ".s3." REGION ".amazonaws.com");
     AddHeader(request, "Content-Length", std::to_string(m_fileSize));
     AddHeader(request, "Content-Type", "application/octet-stream");
@@ -211,11 +213,28 @@ Upload::Upload(const std::string &filepath)
     options.user_data = this;
     options.finish_callback = OnResponseComplete;
 
+    aws_async_input_stream *asyncStream = NULL;
+    if (true) // do async?
+    {
+        aws_async_input_stream_tester_options asyncOptions;
+        AWS_ZERO_STRUCT(asyncOptions);
+        asyncOptions.completion_strategy = AWS_ASYNC_READ_COMPLETES_IMMEDIATELY;
+        asyncOptions.base.source_stream = fileStream;
+
+        asyncStream = aws_async_input_stream_new_tester(g_alloc, &asyncOptions);
+        options.send_async_stream = asyncStream;
+    }
+    else
+    {
+        aws_http_message_set_body_stream(request, fileStream);
+    }
+
     m_metaRequest = aws_s3_client_make_meta_request(g_s3Client, &options);
     AWS_FATAL_ASSERT(m_metaRequest);
 
     aws_http_message_release(request);
     aws_input_stream_release(fileStream);
+    aws_async_input_stream_release(asyncStream);
 }
 
 double GetDuration(Clock::time_point startTime)
@@ -231,7 +250,8 @@ int main(int argc, char *argv[])
 
     Init();
 
-    fprintf(stderr, "DURATION,START,END,SENDING,WAITING,RECEIVING,CONN REQ#,ERROR,STATUS CODE,IP,CONN ID,THREAD ID,REQUEST,X-AMZ-REQUEST-ID,X-AMZ-ID-2\n");
+    // fprintf(stderr, "DURATION,START,END,SENDING,WAITING,RECEIVING,CONN REQ#,ERROR,STATUS CODE,IP,CONN ID,THREAD ID,REQUEST,X-AMZ-REQUEST-ID,X-AMZ-ID-2\n");
+    fprintf(stderr, "GAP,DURATION,START,END\n");
 
     auto appStart = Clock::now();
     int repeatI = 0;
